@@ -51,7 +51,7 @@ fn new_etcd_client(core: &Core, opts: &Context) -> Result<etcd::Client<hyper::cl
 struct UserInfo {
     username: String,
     password: String,
-    id: i32,
+    id: String,
     encoded_password: String,
 }
 
@@ -76,14 +76,14 @@ fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Bo
                     } 
                     else if key == format!("/users/{}/id", user_info.username)
                     {
-                        user_info.id = value.parse().unwrap_or(-1);
+                        user_info.id = value;
                     }
 
                 }
                 // println!("{:?}", user_info); 
             } else {
                 user_info.encoded_password = String::from("");
-                user_info.id = -1;
+                user_info.id = String::from("-1");
             }
 
             Ok(())
@@ -96,7 +96,7 @@ fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Bo
     }
 
     // Check result of fetch
-    if user_info.id == -1 {
+    if user_info.id == "" {
         Err("Cannot fetch user information")?;
     }
 
