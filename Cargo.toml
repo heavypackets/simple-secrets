@@ -1,0 +1,13 @@
+[package]
+name = "simple-secrets"
+version = "0.1.0"
+authors = ["Sabree Blackmon <sabree@heavypackets.sh>"]
+
+[dependencies]
+iron = "0.6.0"
+router = "0.6.0"
+tokio-core = "*"
+futures = "0.1.14"
+etcd = "*"
+hyper = "0.11.2"
+argonautica = "*"
