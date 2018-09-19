@@ -89,9 +89,10 @@ fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Bo
             Ok(())
         });
         
-        if let Err(_) = core.run(fetched_user)
+        if let Err(e) = core.run(fetched_user)
         {
-            Err("User not found")?;
+            println!("{:?}", e);
+            Err("Cannot fetch user information")?;
         }
     }
 
