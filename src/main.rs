@@ -298,6 +298,7 @@ fn fetch_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
         return Ok(Response::with((iron::status::Ok, value)));
     } 
     else {
+        println!("Secret {} not found", name);
         return Ok(Response::with(iron::status::BadRequest));
     }
 }
