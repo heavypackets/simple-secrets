@@ -6,6 +6,7 @@ extern crate tokio_core;
 extern crate hyper;
 extern crate argonautica;
 extern crate rand;
+extern crate uuid;
 
 use iron::prelude::*;
 use iron::headers::*;
@@ -23,14 +24,20 @@ fn main() {
     let context = context();
 
     let mut router = Router::new();
-    router.get("/login", move |request: &mut Request| login(request, &context), "login");
+    {
+        let context = context.clone();
+        router.get("/login", move |request: &mut Request| login(request, &context), "login");
+    } 
     router.get("/get/:name", fetch_secret, "get_secret");
-    router.post("/set/:name/:value", set_secret, "set_secret");
+    {
+        let context = context.clone();
+        router.post("/set/:name/:value", move |request: &mut Request| set_secret(request, &context), "set_secret");
+    }
 
     Iron::new(router).http("localhost:3000").unwrap();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Context {
     etcd_hosts: String,
     token_expiration_secs: u64
@@ -184,14 +191,71 @@ fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<
         Ok(client) => client,
         Err(_) => Err("Unable to create etcd client")?
     };
-    let set_token = kv::set(&client, format!("/users/{}/token", user_info.username).as_str(), user_info.token.as_str(), Some(context.token_expiration_secs));
+    let set_token = kv::set(&client, format!("/session_tokens/{}", user_info.token).as_str(), user_info.username.as_str(), Some(context.token_expiration_secs));
     core.run(set_token).or(Err(format!("Unable to update etcd token value for user {}", user_info.username)))?;
     
     Ok(())
 }
 
-fn set_secret(_req: &mut Request) -> IronResult<Response> {
-    Ok(Response::with(iron::status::Ok))
+fn set_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
+    // Parse name/value from URL
+    let args;
+    
+    match req.extensions.get::<Router>()
+    {
+        Some(params) => args = (params.find("name").unwrap_or(""), params.find("value").unwrap_or("")),
+        None => return Ok(Response::with(iron::status::BadRequest))
+    };
+    
+    // Validate token
+    let token = match req.url.query() {
+        Some(val) => val.replace("token=", ""),
+        None => return Ok(Response::with(iron::status::BadRequest))
+    };
+    if let Err(e) = validate_token(&token, &context) {
+        println!("{}", e);
+        return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
+    }
+    // println!("{} {} {}", args.0, args.1, token);
+
+    // Set secret
+    let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, args.0.as_bytes()); // Use secret name to gen SHA1-based UUID
+    if let Err(e) = set_etcd_key(&format!("/secrets/{}/name", uuid), args.0, &context, None) {
+        println!("{}", e);
+        return Ok(Response::with(iron::status::InternalServerError));
+    }
+    if let Err(e) = set_etcd_key(&format!("/secrets/{}/value", uuid), args.1, &context, None) {
+        println!("{}", e);
+        return Ok(Response::with(iron::status::InternalServerError));
+    }
+    
+    Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
+}
+
+fn set_etcd_key(key: &str, value: &str, context: &Context, expiration: Option<u64>) -> Result<(), Box<Error>> {
+    let mut core = Core::new()?;
+    let client = match new_etcd_client(&core, &context) {
+        Ok(client) => client,
+        Err(_) => Err("Unable to create etcd client")?
+    };
+
+    let set_token = kv::set(&client, key, value, expiration);
+    core.run(set_token).or(Err(format!("Unable to update etcd key {}", key)))?;
+
+    Ok(())
+}
+
+fn validate_token(token: &str, context: &Context) -> Result<(), Box<Error>> {
+    let mut core = Core::new()?;
+    let client = match new_etcd_client(&core, &context) {
+        Ok(client) => client,
+        Err(_) => Err("Unable to create etcd client")?
+    };
+
+    let fetch_token = kv::get(&client, &format!("/session_tokens/{}", token), kv::GetOptions::default());
+    core.run(fetch_token).or(Err(format!("Token {} not found", token)))?;
+    
+    Ok(())
 }
 
 fn fetch_secret(_req: &mut Request) -> IronResult<Response> {
