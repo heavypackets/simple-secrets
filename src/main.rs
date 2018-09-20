@@ -58,7 +58,7 @@ fn context() -> Context {
         context.etcd_hosts = val; 
     }
     if let Ok(val) = std::env::var("TOKEN_EXPIRATION_SECS") {
-        context.token_expiration_secs = str::parse::<u64>(val.as_str()).unwrap_or(600); 
+        context.token_expiration_secs = str::parse::<u64>(&val).unwrap_or(600); 
     }
 
     context
@@ -89,7 +89,7 @@ fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Bo
         Err(_) => Err("Unable to create etcd client")?
     };
 
-    let fetched_user = kv::get(&client, format!("/users/{}", user_info.username).as_str(), kv::GetOptions {recursive: true, ..kv::GetOptions::default()}).and_then(|response| {
+    let fetched_user = kv::get(&client, &format!("/users/{}", user_info.username), kv::GetOptions {recursive: true, ..kv::GetOptions::default()}).and_then(|response| {
         if let Some(user_nodes) = response.data.node.nodes {
             for node in user_nodes {
                 let key = node.key.unwrap_or("".to_string());
@@ -186,7 +186,7 @@ fn generate_authorization_token() -> String {
 }
 
 fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<Error>> { 
-    set_etcd_key(&format!("/session_tokens/{}", user_info.token), user_info.username.as_str(), &context, Some(context.token_expiration_secs))?;
+    set_etcd_key(&format!("/session_tokens/{}", user_info.token), &user_info.username, &context, Some(context.token_expiration_secs))?;
     
     Ok(())
 }
