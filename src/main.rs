@@ -30,17 +30,30 @@ fn main() {
     Iron::new(router).http("localhost:3000").unwrap();
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Context {
-    etcd_hosts: String
+    etcd_hosts: String,
+    token_expiration_secs: u64
+}
+
+impl Default for Context {
+    fn default() -> Context {
+        Context {
+            etcd_hosts: String::from("http://localhost:2379"),
+            token_expiration_secs: 600
+        }
+    }
 }
 
 fn context() -> Context {
     let mut context = Context::default();
-    context.etcd_hosts = match std::env::var("ETCD_CLUSTER_MEMBERS") {
-        Ok(val) => val,
-        Err(_) => String::from("http://localhost:2379")
-    };
+    if let Ok(val) = std::env::var("ETCD_CLUSTER_MEMBERS") {
+        context.etcd_hosts = val; 
+    }
+    if let Ok(val) = std::env::var("TOKEN_EXPIRATION_SECS") {
+        context.token_expiration_secs = str::parse::<u64>(val.as_str()).unwrap_or(600); 
+    }
+
     context
 }
 
@@ -171,7 +184,7 @@ fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<
         Ok(client) => client,
         Err(_) => Err("Unable to create etcd client")?
     };
-    let set_token = kv::set(&client, format!("/users/{}/token", user_info.username).as_str(), user_info.token.as_str(), Some(600));
+    let set_token = kv::set(&client, format!("/users/{}/token", user_info.username).as_str(), user_info.token.as_str(), Some(context.token_expiration_secs));
     core.run(set_token).or(Err(format!("Unable to update etcd token value for user {}", user_info.username)))?;
     
     Ok(())
