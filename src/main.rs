@@ -5,6 +5,7 @@ extern crate futures;
 extern crate tokio_core;
 extern crate hyper;
 extern crate argonautica;
+extern crate rand;
 
 use iron::prelude::*;
 use iron::headers::*;
@@ -12,6 +13,9 @@ use router::Router;
 use etcd::kv::{self};
 use futures::Future;
 use tokio_core::reactor::Core;
+
+use rand::{Rng, thread_rng};
+use rand::distributions::Alphanumeric;
 
 use std::error::Error;
 
@@ -47,57 +51,56 @@ fn new_etcd_client(core: &Core, opts: &Context) -> Result<etcd::Client<hyper::cl
         None)
 }
 
+type AuthToken = String;
+
 #[derive(Debug, Default)]
 struct UserInfo {
     username: String,
     password: String,
     id: String,
     encoded_password: String,
+    token: AuthToken,
 }
 
 fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Box<Error>> {
     let mut core = Core::new()?;
-    {
-        let client = match new_etcd_client(&core, &context) {
-            Ok(client) => client,
-            Err(_) => Err("Unable to create etcd client")?
-        };
+    let client = match new_etcd_client(&core, &context) {
+        Ok(client) => client,
+        Err(_) => Err("Unable to create etcd client")?
+    };
 
-        let fetched_user = kv::get(&client, format!("/users/{}", user_info.username).as_str(), kv::GetOptions {recursive: true, ..kv::GetOptions::default()}).and_then(|response| {
-            if let Some(user_nodes) = response.data.node.nodes {
-                for node in user_nodes {
-                    let key = node.key.unwrap_or("".to_string());
-                    let value = node.value.unwrap_or("".to_string());
-                    // println!("{}: {}", key, value);
+    let fetched_user = kv::get(&client, format!("/users/{}", user_info.username).as_str(), kv::GetOptions {recursive: true, ..kv::GetOptions::default()}).and_then(|response| {
+        if let Some(user_nodes) = response.data.node.nodes {
+            for node in user_nodes {
+                let key = node.key.unwrap_or("".to_string());
+                let value = node.value.unwrap_or("".to_string());
+                // println!("{}: {}", key, value);
 
-                    if key == format!("/users/{}/password", user_info.username) 
-                    { 
-                        user_info.encoded_password = value;
-                    } 
-                    else if key == format!("/users/{}/id", user_info.username)
-                    {
-                        user_info.id = value;
-                    }
-
+                if key == format!("/users/{}/password", user_info.username) 
+                { 
+                    user_info.encoded_password = value;
+                } 
+                else if key == format!("/users/{}/id", user_info.username)
+                {
+                    user_info.id = value;
                 }
-                // println!("{:?}", user_info); 
-            } else {
-                user_info.encoded_password = String::from("");
-                user_info.id = String::from("-1");
+                else if key == format!("/users/{}/token", user_info.username)
+                {
+                    user_info.token = value;
+                }
             }
-
-            Ok(())
-        });
-        
-        if let Err(e) = core.run(fetched_user)
-        {
-            println!("{:?}", e);
-            Err("Cannot fetch user information")?;
+            // println!("{:?}", user_info); 
+        } else {
+            user_info.encoded_password = String::from("");
+            user_info.id = String::from("-1");
         }
-    }
 
-    // Check result of fetch
-    if user_info.id == "" {
+        Ok(())
+    });
+    
+    if let Err(e) = core.run(fetched_user)
+    {
+        println!("{:?}", e);
         Err("Cannot fetch user information")?;
     }
 
@@ -138,14 +141,40 @@ fn login(req: &mut Request, context: &Context) -> IronResult<Response> {
     }
 
     // Check password
-    if verify_password(&user_info)
+    if !verify_password(&user_info)
     {
-        Ok(Response::with(iron::status::Ok))
-    } else {
         println!("Invalid password");
-        Ok(Response::with(iron::status::Unauthorized))
+        return Ok(Response::with(iron::status::Unauthorized))
     }
 
+    // Generate and set new token
+    user_info.token = generate_authorization_token();
+    if let Ok(_) = update_user_token(&user_info, &context) {
+        Ok(Response::with((iron::status::Ok, user_info.token)))
+    } else {
+        println!("Unable to update user token");
+        Ok(Response::with(iron::status::InternalServerError))
+    }    
+}
+
+fn generate_authorization_token() -> String {
+    let mut rng = thread_rng();
+    std::iter::repeat(())
+        .map(|()| rng.sample(Alphanumeric))
+        .take(24)
+        .collect()
+}
+
+fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<Error>> {
+    let mut core = Core::new()?;
+    let client = match new_etcd_client(&core, &context) {
+        Ok(client) => client,
+        Err(_) => Err("Unable to create etcd client")?
+    };
+    let set_token = kv::set(&client, format!("/users/{}/token", user_info.username).as_str(), user_info.token.as_str(), Some(600));
+    core.run(set_token).or(Err(format!("Unable to update etcd token value for user {}", user_info.username)))?;
+    
+    Ok(())
 }
 
 fn set_secret(_req: &mut Request) -> IronResult<Response> {
