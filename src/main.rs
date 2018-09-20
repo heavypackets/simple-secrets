@@ -80,50 +80,14 @@ type AuthToken = String;
 struct UserInfo {
     username: String,
     password: String,
-    id: String,
     encoded_password: String,
     token: AuthToken,
 }
 
-fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Box<Error>> {
-    let mut core = Core::new()?;
-    let client = match new_etcd_client(&core, &context) {
-        Ok(client) => client,
-        Err(_) => Err("Unable to create etcd client")?
-    };
-
-    let fetched_user = kv::get(&client, &format!("/users/{}", user_info.username), kv::GetOptions {recursive: true, ..kv::GetOptions::default()}).and_then(|response| {
-        if let Some(user_nodes) = response.data.node.nodes {
-            for node in user_nodes {
-                let key = node.key.unwrap_or("".to_string());
-                let value = node.value.unwrap_or("".to_string());
-                // println!("{}: {}", key, value);
-
-                if key == format!("/users/{}/password", user_info.username) 
-                { 
-                    user_info.encoded_password = value;
-                } 
-                else if key == format!("/users/{}/id", user_info.username)
-                {
-                    user_info.id = value;
-                }
-            }
-            // println!("{:?}", user_info); 
-        } else {
-            user_info.encoded_password = String::from("");
-            user_info.id = String::from("-1");
-        }
-
-        Ok(())
-    });
-    
-    if let Err(e) = core.run(fetched_user)
-    {
-        println!("{:?}", e);
-        Err("Cannot fetch user information")?;
+fn fetch_user_password(user_info: &mut UserInfo, context: &Context) {  
+    if let Ok(value) = get_etcd_key(&format!("/users/{}/password", user_info.username), &context) {
+        user_info.encoded_password = value
     }
-
-    Ok(())
 }
 
 fn verify_password(user_info: &UserInfo) -> bool {
@@ -153,11 +117,8 @@ fn login(req: &mut Request, context: &Context) -> IronResult<Response> {
         None  => return Ok(Response::with(iron::status::Unauthorized))
     };
     
-    // Fetch user information from etcd
-    if let Err(e) = fetch_user_info(&mut user_info, &context) {
-        println!("{}", e);
-        return Ok(Response::with(iron::status::Unauthorized))
-    }
+    // Fetch user password from etcd
+    fetch_user_password(&mut user_info, &context);
 
     // Check password
     if !verify_password(&user_info)
