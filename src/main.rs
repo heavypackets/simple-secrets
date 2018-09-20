@@ -107,10 +107,6 @@ fn fetch_user_info(user_info: &mut UserInfo, context: &Context) -> Result<(), Bo
                 {
                     user_info.id = value;
                 }
-                else if key == format!("/users/{}/token", user_info.username)
-                {
-                    user_info.token = value;
-                }
             }
             // println!("{:?}", user_info); 
         } else {
