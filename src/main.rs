@@ -60,7 +60,7 @@ fn main() {
     router.get("/get/:name", fetch_secret, "get_secret");
     router.post("/set/:name/:value", set_secret, "set_secret");
 
-    Iron::new(router).http("localhost:3000").unwrap();
+    Iron::new(router).http("0.0.0.0:3000").unwrap();
 }
 
 fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>> {
