@@ -10,6 +10,8 @@ extern crate uuid;
 
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate error_chain;
 
 use iron::prelude::*;
 use iron::headers::*;
@@ -21,7 +23,7 @@ use tokio_core::reactor::Core;
 use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
 
-use std::error::Error;
+use errors::*;
 
 lazy_static! {
     static ref ETCD_CLUSTER_MEMBERS: &'static str = {
@@ -39,6 +41,18 @@ lazy_static! {
         }
     };
 }
+mod errors {
+    error_chain!{
+        types {
+            Error, ErrorKind, ResultExt, Result;
+        }
+
+        foreign_links {
+             Io(::std::io::Error);
+             Etcd(::etcd::Error);
+        }
+    }
+}
 
 fn main() {
     let mut router = Router::new();
@@ -49,11 +63,9 @@ fn main() {
     Iron::new(router).http("localhost:3000").unwrap();
 }
 
-fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>, etcd::Error> {
+fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>> {
     let handle = core.handle();
-    etcd::Client::new(&handle, 
-     ETCD_CLUSTER_MEMBERS.split(",").collect::<Vec<&str>>().as_slice(),
-        None)
+    etcd::Client::new(&handle,ETCD_CLUSTER_MEMBERS.split(",").collect::<Vec<&str>>().as_slice(), None).chain_err(|| "Cannot create etcd client")
 }
 
 type AuthToken = String;
@@ -127,7 +139,7 @@ fn generate_authorization_token() -> String {
         .collect()
 }
 
-fn update_user_token(user_info: &UserInfo) -> Result<(), Box<Error>> { 
+fn update_user_token(user_info: &UserInfo) -> Result<()> { 
     set_etcd_key(&format!("/session_tokens/{}", user_info.token), &user_info.username, Some(*TOKEN_EXPIRATION_SECS))?;
     
     Ok(())
@@ -168,7 +180,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
 }
 
-fn set_etcd_key(key: &str, value: &str, expiration: Option<u64>) -> Result<(), Box<Error>> {
+fn set_etcd_key(key: &str, value: &str, expiration: Option<u64>) -> Result<()> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
@@ -181,7 +193,7 @@ fn set_etcd_key(key: &str, value: &str, expiration: Option<u64>) -> Result<(), B
     Ok(())
 }
 
-fn get_etcd_key(key: &str) -> Result<String, Box<Error>> {
+fn get_etcd_key(key: &str) -> Result<String> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
@@ -201,7 +213,7 @@ fn get_etcd_key(key: &str) -> Result<String, Box<Error>> {
     Ok(value.unwrap_or(String::from("")))
 }
 
-fn validate_token(token: &str) -> Result<(), Box<Error>> {
+fn validate_token(token: &str) -> Result<()> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,

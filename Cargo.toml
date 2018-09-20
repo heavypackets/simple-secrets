@@ -14,3 +14,4 @@ argonautica = "*"
 rand = "0.5.5"
 uuid = { version = "0.7", features = ["v5"] }
 lazy_static = "1.1.0"
+error-chain = "0.12.0"
