@@ -239,6 +239,26 @@ fn set_etcd_key(key: &str, value: &str, context: &Context, expiration: Option<u6
     Ok(())
 }
 
+fn get_etcd_key(key: &str, context: &Context) -> Result<String, Box<Error>> {
+    let mut core = Core::new()?;
+    let client = match new_etcd_client(&core, &context) {
+        Ok(client) => client,
+        Err(_) => Err("Unable to create etcd client")?
+    };
+
+    let mut value = None;
+    {
+        let get_token = kv::get(&client, key, kv::GetOptions::default()).and_then(|response| {
+            value = response.data.node.value;
+
+            Ok(())
+        });
+        core.run(get_token).or(Err(format!("Unable to fetch etcd key {}", key)))?;
+    }
+
+    Ok(value.unwrap_or(String::from("")))
+}
+
 fn validate_token(token: &str, context: &Context) -> Result<(), Box<Error>> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core, &context) {
