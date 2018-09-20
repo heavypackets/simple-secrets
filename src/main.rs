@@ -27,8 +27,11 @@ fn main() {
     {
         let context = context.clone();
         router.get("/login", move |request: &mut Request| login(request, &context), "login");
-    } 
-    router.get("/get/:name", fetch_secret, "get_secret");
+    }
+    {
+        let context = context.clone();
+        router.get("/get/:name", move |request: &mut Request| fetch_secret(request, &context), "get_secret");
+    }
     {
         let context = context.clone();
         router.post("/set/:name/:value", move |request: &mut Request| set_secret(request, &context), "set_secret");
@@ -272,6 +275,33 @@ fn validate_token(token: &str, context: &Context) -> Result<(), Box<Error>> {
     Ok(())
 }
 
-fn fetch_secret(_req: &mut Request) -> IronResult<Response> {
-    Ok(Response::with(iron::status::Ok))
+fn fetch_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
+    // Parse name from URL
+    let name;
+    
+    match req.extensions.get::<Router>()
+    {
+        Some(params) => name = params.find("name").unwrap_or(""),
+        None => return Ok(Response::with(iron::status::BadRequest)) // This should never happen
+    };
+    
+    // Validate token
+    let token = match req.url.query() {
+        Some(val) => val.replace("token=", ""),
+        None => return Ok(Response::with(iron::status::BadRequest))
+    };
+    if let Err(e) = validate_token(&token, &context) {
+        println!("{}", e);
+        return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
+    }
+
+    // Fetch secret
+    let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes());
+    if let Ok(value) = get_etcd_key(&format!("/secrets/{}/value", uuid), &context)
+    {
+        return Ok(Response::with((iron::status::Ok, value)));
+    } 
+    else {
+        return Ok(Response::with(iron::status::BadRequest));
+    }
 }
