@@ -185,14 +185,8 @@ fn generate_authorization_token() -> String {
         .collect()
 }
 
-fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<Error>> {
-    let mut core = Core::new()?;
-    let client = match new_etcd_client(&core, &context) {
-        Ok(client) => client,
-        Err(_) => Err("Unable to create etcd client")?
-    };
-    let set_token = kv::set(&client, format!("/session_tokens/{}", user_info.token).as_str(), user_info.username.as_str(), Some(context.token_expiration_secs));
-    core.run(set_token).or(Err(format!("Unable to update etcd token value for user {}", user_info.username)))?;
+fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<Error>> { 
+    set_etcd_key(&format!("/session_tokens/{}", user_info.token), user_info.username.as_str(), &context, Some(context.token_expiration_secs))?;
     
     Ok(())
 }
