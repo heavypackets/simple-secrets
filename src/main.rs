@@ -8,6 +8,9 @@ extern crate argonautica;
 extern crate rand;
 extern crate uuid;
 
+#[macro_use]
+extern crate lazy_static;
+
 use iron::prelude::*;
 use iron::headers::*;
 use router::Router;
@@ -20,57 +23,36 @@ use rand::distributions::Alphanumeric;
 
 use std::error::Error;
 
-fn main() {
-    let context = context();
+lazy_static! {
+    static ref ETCD_CLUSTER_MEMBERS: &'static str = {
+        if let Ok(val) = std::env::var("ETCD_CLUSTER_MEMBERS") {
+            Box::leak(val.into_boxed_str())
+        } else {
+            "http://localhost:2379"
+        }
+    };
+    static ref TOKEN_EXPIRATION_SECS: u64 = {
+        if let Ok(val) = std::env::var("TOKEN_EXPIRATION_SECS") {
+            str::parse::<u64>(&val).unwrap_or(600)
+        } else {
+            600
+        }
+    };
+}
 
+fn main() {
     let mut router = Router::new();
-    {
-        let context = context.clone();
-        router.get("/login", move |request: &mut Request| login(request, &context), "login");
-    }
-    {
-        let context = context.clone();
-        router.get("/get/:name", move |request: &mut Request| fetch_secret(request, &context), "get_secret");
-    }
-    {
-        let context = context.clone();
-        router.post("/set/:name/:value", move |request: &mut Request| set_secret(request, &context), "set_secret");
-    }
+    router.get("/login", login, "login");
+    router.get("/get/:name", fetch_secret, "get_secret");
+    router.post("/set/:name/:value", set_secret, "set_secret");
 
     Iron::new(router).http("localhost:3000").unwrap();
 }
 
-#[derive(Debug, Clone)]
-struct Context {
-    etcd_hosts: String,
-    token_expiration_secs: u64
-}
-
-impl Default for Context {
-    fn default() -> Context {
-        Context {
-            etcd_hosts: String::from("http://localhost:2379"),
-            token_expiration_secs: 600
-        }
-    }
-}
-
-fn context() -> Context {
-    let mut context = Context::default();
-    if let Ok(val) = std::env::var("ETCD_CLUSTER_MEMBERS") {
-        context.etcd_hosts = val; 
-    }
-    if let Ok(val) = std::env::var("TOKEN_EXPIRATION_SECS") {
-        context.token_expiration_secs = str::parse::<u64>(&val).unwrap_or(600); 
-    }
-
-    context
-}
-
-fn new_etcd_client(core: &Core, opts: &Context) -> Result<etcd::Client<hyper::client::HttpConnector>, etcd::Error> {
+fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>, etcd::Error> {
     let handle = core.handle();
     etcd::Client::new(&handle, 
-        opts.etcd_hosts.split(",").collect::<Vec<&str>>().as_slice(),
+     ETCD_CLUSTER_MEMBERS.split(",").collect::<Vec<&str>>().as_slice(),
         None)
 }
 
@@ -84,8 +66,8 @@ struct UserInfo {
     token: AuthToken,
 }
 
-fn fetch_user_password(user_info: &mut UserInfo, context: &Context) {  
-    if let Ok(value) = get_etcd_key(&format!("/users/{}/password", user_info.username), &context) {
+fn fetch_user_password(user_info: &mut UserInfo) {  
+    if let Ok(value) = get_etcd_key(&format!("/users/{}/password", user_info.username)) {
         user_info.encoded_password = value
     }
 }
@@ -103,7 +85,7 @@ fn verify_password(user_info: &UserInfo) -> bool {
     }
 }
 
-fn login(req: &mut Request, context: &Context) -> IronResult<Response> {
+fn login(req: &mut Request) -> IronResult<Response> {
     // Parse username and password from request
     let auth = match req.headers.get::<Authorization<Basic>>() {
         Some(auth) => auth,
@@ -118,7 +100,7 @@ fn login(req: &mut Request, context: &Context) -> IronResult<Response> {
     };
     
     // Fetch user password from etcd
-    fetch_user_password(&mut user_info, &context);
+    fetch_user_password(&mut user_info);
 
     // Check password
     if !verify_password(&user_info)
@@ -129,7 +111,7 @@ fn login(req: &mut Request, context: &Context) -> IronResult<Response> {
 
     // Generate and set new token
     user_info.token = generate_authorization_token();
-    if let Ok(_) = update_user_token(&user_info, &context) {
+    if let Ok(_) = update_user_token(&user_info) {
         Ok(Response::with((iron::status::Ok, user_info.token)))
     } else {
         println!("Unable to update user token");
@@ -145,13 +127,13 @@ fn generate_authorization_token() -> String {
         .collect()
 }
 
-fn update_user_token(user_info: &UserInfo, context: &Context) -> Result<(), Box<Error>> { 
-    set_etcd_key(&format!("/session_tokens/{}", user_info.token), &user_info.username, &context, Some(context.token_expiration_secs))?;
+fn update_user_token(user_info: &UserInfo) -> Result<(), Box<Error>> { 
+    set_etcd_key(&format!("/session_tokens/{}", user_info.token), &user_info.username, Some(*TOKEN_EXPIRATION_SECS))?;
     
     Ok(())
 }
 
-fn set_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
+fn set_secret(req: &mut Request) -> IronResult<Response> {
     // Parse name/value from URL
     let args;
     
@@ -166,7 +148,7 @@ fn set_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
         Some(val) => val.replace("token=", ""),
         None => return Ok(Response::with(iron::status::BadRequest))
     };
-    if let Err(e) = validate_token(&token, &context) {
+    if let Err(e) = validate_token(&token) {
         println!("{}", e);
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
@@ -174,11 +156,11 @@ fn set_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
 
     // Set secret
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, args.0.as_bytes()); // Use secret name to gen SHA1-based UUID
-    if let Err(e) = set_etcd_key(&format!("/secrets/{}/name", uuid), args.0, &context, None) {
+    if let Err(e) = set_etcd_key(&format!("/secrets/{}/name", uuid), args.0, None) {
         println!("{}", e);
         return Ok(Response::with(iron::status::InternalServerError));
     }
-    if let Err(e) = set_etcd_key(&format!("/secrets/{}/value", uuid), args.1, &context, None) {
+    if let Err(e) = set_etcd_key(&format!("/secrets/{}/value", uuid), args.1, None) {
         println!("{}", e);
         return Ok(Response::with(iron::status::InternalServerError));
     }
@@ -186,9 +168,9 @@ fn set_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
     Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
 }
 
-fn set_etcd_key(key: &str, value: &str, context: &Context, expiration: Option<u64>) -> Result<(), Box<Error>> {
+fn set_etcd_key(key: &str, value: &str, expiration: Option<u64>) -> Result<(), Box<Error>> {
     let mut core = Core::new()?;
-    let client = match new_etcd_client(&core, &context) {
+    let client = match new_etcd_client(&core) {
         Ok(client) => client,
         Err(_) => Err("Unable to create etcd client")?
     };
@@ -199,9 +181,9 @@ fn set_etcd_key(key: &str, value: &str, context: &Context, expiration: Option<u6
     Ok(())
 }
 
-fn get_etcd_key(key: &str, context: &Context) -> Result<String, Box<Error>> {
+fn get_etcd_key(key: &str) -> Result<String, Box<Error>> {
     let mut core = Core::new()?;
-    let client = match new_etcd_client(&core, &context) {
+    let client = match new_etcd_client(&core) {
         Ok(client) => client,
         Err(_) => Err("Unable to create etcd client")?
     };
@@ -219,9 +201,9 @@ fn get_etcd_key(key: &str, context: &Context) -> Result<String, Box<Error>> {
     Ok(value.unwrap_or(String::from("")))
 }
 
-fn validate_token(token: &str, context: &Context) -> Result<(), Box<Error>> {
+fn validate_token(token: &str) -> Result<(), Box<Error>> {
     let mut core = Core::new()?;
-    let client = match new_etcd_client(&core, &context) {
+    let client = match new_etcd_client(&core) {
         Ok(client) => client,
         Err(_) => Err("Unable to create etcd client")?
     };
@@ -232,7 +214,7 @@ fn validate_token(token: &str, context: &Context) -> Result<(), Box<Error>> {
     Ok(())
 }
 
-fn fetch_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
+fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     // Parse name from URL
     let name;
     
@@ -247,14 +229,14 @@ fn fetch_secret(req: &mut Request, context: &Context) -> IronResult<Response> {
         Some(val) => val.replace("token=", ""),
         None => return Ok(Response::with(iron::status::BadRequest))
     };
-    if let Err(e) = validate_token(&token, &context) {
+    if let Err(e) = validate_token(&token) {
         println!("{}", e);
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
 
     // Fetch secret
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes());
-    if let Ok(value) = get_etcd_key(&format!("/secrets/{}/value", uuid), &context)
+    if let Ok(value) = get_etcd_key(&format!("/secrets/{}/value", uuid))
     {
         return Ok(Response::with((iron::status::Ok, value)));
     } 
