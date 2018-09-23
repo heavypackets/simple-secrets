@@ -147,7 +147,7 @@ fn login(req: &mut Request) -> IronResult<Response> {
     // Check password
     if !verify_password(&user_info)
     {
-        //audit_event("LOGIN_FAILURE_INVALD_PASSWORD", &format!("Login failure for user {} due to invalid password", user_info.username));
+        audit_event("LOGIN_FAILURE_INVALID_PASSWORD", &format!("Login failure for user {} due to invalid password", user_info.username));
         return Ok(Response::with(iron::status::Unauthorized))
     }
 
@@ -158,7 +158,6 @@ fn login(req: &mut Request) -> IronResult<Response> {
         audit_event("LOGIN_SUCCESS", &format!("Login success for user {}", user_info.username));
         Ok(Response::with((iron::status::Ok, user_info.token)))
     } else {
-        println!("Unable to create token session");
         audit_event("LOGIN_FAILURE_TOKEN_CREATION_FAIL", &format!("Login failure for user {} due to token creation failure", user_info.username));
         Ok(Response::with(iron::status::InternalServerError))
     }
@@ -193,23 +192,29 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         Some(val) => val.replace("token=", ""),
         None => return Ok(Response::with(iron::status::BadRequest))
     };
-    if let Err(e) = validate_token(&token) {
-        println!("{}", e);
-        return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
+
+    let username;
+    match validate_token(&token) {
+        Ok(val) => username = val,
+        _ => return Ok(Response::with((iron::status::Unauthorized, "Bad token")))
     }
 
     // Set secret
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, args.0.as_bytes()); // Use secret name to gen SHA1-based UUID
     if let Err(e) = set_etcd_key(&format!("/secrets/{}/name", uuid), args.0, None) {
-        println!("{}", e);
+        eprintln!("Unable to set secret key: {}", e);
+        audit_event("SECRET_CREATE_FAILURE", &format!("Unable to set secret {} by user {}, internal error", args.0, username));
+
         return Ok(Response::with(iron::status::InternalServerError));
     }
     if let Err(e) = set_etcd_key(&format!("/secrets/{}/value", uuid), args.1, None) {
-        println!("{}", e);
+        eprintln!("Unable to set secret value: {}", e);
+        audit_event("SECRET_CREATE_FAILURE", &format!("Unable to set secret {} by user {}, internal error", args.0, username));
+
         return Ok(Response::with(iron::status::InternalServerError));
     }
 
-    audit_event("SECRET_CREATED", &format!("Secret {} set with UUID {}", args.0, uuid));
+    audit_event("SECRET_CREATE_SUCCESS", &format!("Secret {} set with UUID {} by user {}", args.0, uuid, username));
     
     Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
 }
@@ -241,26 +246,30 @@ fn get_etcd_key(key: &str) -> Result<String> {
 
             Ok(())
         });
-        core.run(get_token).or(Err(format!("Unable to fetch etcd key {}", key)))?;
+    core.run(get_token).or(Err(format!("Unable to fetch etcd key {}", key)))?;
     }
 
     Ok(value.unwrap_or(String::from("")))
 }
 
-fn validate_token(token: &str) -> Result<&str> {
+fn validate_token(token: &str) -> Result<String> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
         Err(_) => Err("Unable to create etcd client")?
     };
 
-    let fetch_token = kv::get(&client, &format!("/session_tokens/{}", token), kv::GetOptions::default());
-    core.run(fetch_token).or(Err(format!("Token {} not found", token)))?;
+    let mut username = None;
+    {
+    let fetch_token = kv::get(&client, &format!("/session_tokens/{}", token), kv::GetOptions::default()).and_then(|response| {
+        username = response.data.node.value;
 
-    let user = kv::get(&client, &format!("/session_tokens/{}/user", token), kv::GetOptions::default());
-    core.run(user).or(Err(format!("Token {} not found", token)))?;
+        Ok(())
+    });
+    core.run(fetch_token).or(Err(format!("Token {} not found", token)))?;
+    }
     
-    Ok("")
+    Ok(username.unwrap_or(String::from("")))
 }
 
 fn fetch_secret(req: &mut Request) -> IronResult<Response> {
@@ -274,24 +283,34 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     };
     
     // Validate token
-    let token = match req.url.query() {
-        Some(val) => val.replace("token=", ""),
-        None => return Ok(Response::with(iron::status::BadRequest))
-    };
-    if let Err(e) = validate_token(&token) {
-        println!("{}", e);
+    let token;
+    if let Some(val) = req.url.query() {
+        token = val.replace("token=", "");
+    } else {
+        audit_event("SECRET_FETCH_FAILURE_NO_TOKEN", &format!("Secret {} failed fetch, no token entered attempt", name));
+        return Ok(Response::with((iron::status::BadRequest, "Token required")));
+    }
+
+    let username;
+    if let Ok(val) = validate_token(&token) {
+        username = val;
+    } else {
+        audit_event("SECRET_FETCH_FAILURE_INVALID_TOKEN", &format!("Secret {} failed fetch, invalid token attempt", name));
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
 
     // Fetch secret
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes());
-    if let Ok(value) = get_etcd_key(&format!("/secrets/{}/value", uuid))
-    {
-        return Ok(Response::with((iron::status::Ok, value)));
-        //audit_event("SECRET_RETRIEVED", &format!("Secret {} retrieved by user", user_info.username));
-    } 
-    else {
-        println!("Secret {} not found", name);
-        return Ok(Response::with(iron::status::BadRequest));
+    let value = get_etcd_key(&format!("/secrets/{}/value", uuid));
+    match value {
+        Ok(value) => {
+            audit_event("SECRET_FETCH_SUCCESS", &format!("Secret {} UUID {} fetched by user {}", name, uuid, username));
+            Ok(Response::with((iron::status::Ok, value)))
+        }, 
+        Err(e) => {
+            eprintln!("Unable to fetch secret: {}", e);
+            audit_event("SECRET_FETCH_FAILURE_NOEXIST", &format!("Secret {} failed fetch by user {}, does not exist", name, username));
+            Ok(Response::with((iron::status::BadRequest, "Invalid secret")))
+        }
     }
 }
