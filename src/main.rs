@@ -71,11 +71,16 @@ mod errors {
 }
 
 fn audit_event(title: &str, content: &str) {
-    // Create string to move into thread
-    let title = String::from(title);
-    let content = String::from(content);
+    let mut obj: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    obj.insert(String::from(title), String::from(content));
     let fruently = fluentd_client.clone();
-    std::thread::spawn(move || { let _ = fruently.post((title, content)); });
+
+    std::thread::spawn(move || {
+        if let Err(e) = fruently.post(obj) {
+            eprintln!("{}", e);
+            panic!("Cannot post audit events to fluentd");
+        }
+    });
 }
 
 fn main() {
