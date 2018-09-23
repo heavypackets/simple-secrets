@@ -11,7 +11,7 @@ services:
   etcd0:
     image: quay.io/coreos/etcd
     ports:
-      - 2379
+      - 2379:2379
     volumes:
       - etcd0:/etcd_data
     command:
