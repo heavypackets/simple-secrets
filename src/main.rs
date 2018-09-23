@@ -13,6 +13,8 @@ extern crate fruently;
 extern crate lazy_static;
 #[macro_use]
 extern crate error_chain;
+#[macro_use]
+extern crate prometheus;
 
 use iron::prelude::*;
 use iron::headers::*;
@@ -22,6 +24,7 @@ use futures::Future;
 use tokio_core::reactor::Core;
 use fruently::fluent::Fluent;
 use fruently::forwardable::JsonForwardable;
+use prometheus::{Counter, Encoder, HistogramVec, TextEncoder};
 
 use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
@@ -57,6 +60,62 @@ lazy_static! {
         }
     };
     static ref fluentd_client: Fluent<'static, &'static str> = Fluent::new(*FLUENTD_FORWARD_ADDR, *SPIFFE_ID);
+
+    // Prometheus objects
+    static ref prometheus_encoder: TextEncoder = TextEncoder::new();
+    static ref successful_login_counter: Counter = { 
+        match register_counter!(opts!(
+        "simple_secrets_login_success_total",
+        "Total number of sucessful logins in this instance lifetime.")) {
+            Ok(val) => val,
+            Err(e) => telemetry_config_failed_panic(&e)
+        }
+    };
+    static ref unsuccessful_login_counter: Counter = { 
+        match register_counter!(opts!(
+        "simple_secrets_login_failure_total",
+        "Total number of failed logins in this instance lifetime.")) {
+            Ok(val) => val,
+            Err(e) => telemetry_config_failed_panic(&e)
+        }
+    };
+    static ref secrets_fetch_counter: Counter = { 
+        match register_counter!(opts!(
+        "simple_secrets_secret_fetch_total",
+        "Total number of secrets accessed in this instance lifetime.")) {
+            Ok(val) => val,
+            Err(e) => telemetry_config_failed_panic(&e)
+        }
+    };
+    static ref secrets_fetch_access_denied_counter: Counter = { 
+        match register_counter!(opts!(
+        "simple_secrets_secret_fetch_access_denied_total",
+        "Total number of unsuccessful secret access attempts in this instance lifetime due to invalid token.")) {
+            Ok(val) => val,
+            Err(e) => telemetry_config_failed_panic(&e)
+        }
+    };
+    static ref secrets_set_counter: Counter = { 
+        match register_counter!(opts!(
+        "simple_secrets_secret_set_total",
+        "Total number of secrets set in this instance lifetime.")) {
+            Ok(val) => val,
+            Err(e) => telemetry_config_failed_panic(&e)
+        }
+    };
+    static ref secrets_set_access_denied_counter: Counter = { 
+        match register_counter!(opts!(
+        "simple_secrets_secret_set_access_denied_total",
+        "Total number of unsuccessful secret set attempts in this instance lifetime due to invalid token.")) {
+            Ok(val) => val,
+            Err(e) => telemetry_config_failed_panic(&e)
+        }
+    };
+}
+
+fn telemetry_config_failed_panic(e: &prometheus::Error) -> prometheus::Counter {
+    eprintln!("Unable to create prometheus primative {}", e);
+    panic!("Error creating Prometheus telemetry primative");
 }
 
 mod errors {
@@ -91,6 +150,7 @@ fn main() {
     router.get("/login", login, "login");
     router.get("/get/:name", fetch_secret, "get_secret");
     router.post("/set/:name/:value", set_secret, "set_secret");
+    router.get("/metrics", metrics, "get_metrics");
 
     Iron::new(router).http("0.0.0.0:3000").unwrap();
     audit_event("SERVER_START", &format!("New instance of secret-server started: {}", *SPIFFE_ID));
@@ -151,6 +211,7 @@ fn login(req: &mut Request) -> IronResult<Response> {
     if !verify_password(&user_info)
     {
         audit_event("LOGIN_FAILURE_INVALID_PASSWORD", &format!("Login failure for user {} due to invalid password", user_info.username));
+        unsuccessful_login_counter.inc();
         return Ok(Response::with(iron::status::Unauthorized))
     }
 
@@ -159,6 +220,7 @@ fn login(req: &mut Request) -> IronResult<Response> {
     if let Ok(_) = update_user_token(&user_info) {
         audit_event("TOKEN_CREATED", &format!("Session token {} for user {} created", user_info.token, user_info.username));
         audit_event("LOGIN_SUCCESS", &format!("Login success for user {}", user_info.username));
+        successful_login_counter.inc();
         Ok(Response::with((iron::status::Ok, user_info.token)))
     } else {
         audit_event("LOGIN_FAILURE_TOKEN_CREATION_FAIL", &format!("Login failure for user {} due to token creation failure", user_info.username));
@@ -196,6 +258,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         token = val.replace("token=", "");
     } else {
         audit_event("SECRET_CREATE_FAILURE_NO_TOKEN", &format!("Secret {} failed set, no token entered attempt", args.0));
+        secrets_set_access_denied_counter.inc();
         return Ok(Response::with((iron::status::BadRequest, "Token required")));
     }
 
@@ -204,6 +267,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         username = val;
     } else {
         audit_event("SECRET_CREATE_FAILURE_INVALID_TOKEN", &format!("Secret {} failed set, invalid token attempt", args.0));
+        secrets_set_access_denied_counter.inc();
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
 
@@ -223,7 +287,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     }
 
     audit_event("SECRET_CREATE_SUCCESS", &format!("Secret {} set with UUID {} by user {}", args.0, uuid, username));
-    
+    secrets_set_counter.inc();
     Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
 }
 
@@ -296,6 +360,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
         token = val.replace("token=", "");
     } else {
         audit_event("SECRET_FETCH_FAILURE_NO_TOKEN", &format!("Secret {} failed fetch, no token entered attempt", name));
+        secrets_fetch_access_denied_counter.inc();
         return Ok(Response::with((iron::status::BadRequest, "Token required")));
     }
 
@@ -304,6 +369,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
         username = val;
     } else {
         audit_event("SECRET_FETCH_FAILURE_INVALID_TOKEN", &format!("Secret {} failed fetch, invalid token attempt", name));
+        secrets_fetch_access_denied_counter.inc();
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
 
@@ -313,12 +379,36 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     match value {
         Ok(value) => {
             audit_event("SECRET_FETCH_SUCCESS", &format!("Secret {} UUID {} fetched by user {}", name, uuid, username));
+            secrets_fetch_counter.inc();
             Ok(Response::with((iron::status::Ok, value)))
         }, 
         Err(e) => {
             eprintln!("Unable to fetch secret: {}", e);
             audit_event("SECRET_FETCH_FAILURE_NOEXIST", &format!("Secret {} failed fetch by user {}, does not exist", name, username));
             Ok(Response::with((iron::status::BadRequest, "Invalid secret")))
+        }
+    }
+}
+
+fn metrics(_req: &mut Request) -> IronResult<Response> {
+    let metric_families = prometheus::gather();
+    let mut buffer = vec![];
+
+    match prometheus_encoder.encode(&metric_families, &mut buffer) {
+        Ok(_) => {
+            let body = match String::from_utf8(buffer) {
+                Ok(val) => val,
+                Err(e) => {
+                    eprintln!("Unable to encode prometheus metrics: {}", e.to_string());
+                    return Ok(Response::with(iron::status::InternalServerError))
+                }
+            };
+
+            Ok(Response::with((iron::status::Ok, body)))
+        },
+        Err(e) => {
+            eprintln!("Unable to encode prometheus metrics: {}", e.to_string());
+            Ok(Response::with(iron::status::InternalServerError))
         }
     }
 }
