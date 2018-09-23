@@ -7,6 +7,7 @@ extern crate hyper;
 extern crate argonautica;
 extern crate rand;
 extern crate uuid;
+extern crate fruently;
 
 #[macro_use]
 extern crate lazy_static;
@@ -19,6 +20,8 @@ use router::Router;
 use etcd::kv::{self};
 use futures::Future;
 use tokio_core::reactor::Core;
+use fruently::fluent::Fluent;
+use fruently::forwardable::JsonForwardable;
 
 use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
@@ -40,7 +43,19 @@ lazy_static! {
             600
         }
     };
+
+    static ref SPIFFE_ID: &'static str = "spiffe://example.org/simple-secrets";
+
+    static ref FLUENTD_FORWARD_ADDR: &'static str = {
+        if let Ok(val) = std::env::var("FLUENTD_FORWARD_ADDR") {
+            Box::leak(val.into_boxed_str())
+        } else {
+            "127.0.0.1:24224"
+        }
+    };
+    static ref fluentd_client: Fluent<'static, &'static str> = Fluent::new(*FLUENTD_FORWARD_ADDR, *SPIFFE_ID);
 }
+
 mod errors {
     error_chain!{
         types {
@@ -50,8 +65,17 @@ mod errors {
         foreign_links {
              Io(::std::io::Error);
              Etcd(::etcd::Error);
+             Fluent(::fruently::error::FluentError);
         }
     }
+}
+
+fn audit_event(title: &str, content: &str) {
+    // Create string to move into thread
+    let title = String::from(title);
+    let content = String::from(content);
+    let fruently = fluentd_client.clone();
+    std::thread::spawn(move || { let _ = fruently.post((title, content)); });
 }
 
 fn main() {
@@ -61,6 +85,7 @@ fn main() {
     router.post("/set/:name/:value", set_secret, "set_secret");
 
     Iron::new(router).http("0.0.0.0:3000").unwrap();
+    audit_event("SERVER_START", "New instance of secret-server started");
 }
 
 fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>> {
@@ -117,18 +142,21 @@ fn login(req: &mut Request) -> IronResult<Response> {
     // Check password
     if !verify_password(&user_info)
     {
-        println!("Invalid password");
+        //audit_event("LOGIN_FAILURE_INVALD_PASSWORD", &format!("Login failure for user {} due to invalid password", user_info.username));
         return Ok(Response::with(iron::status::Unauthorized))
     }
 
     // Generate and set new token
     user_info.token = generate_authorization_token();
     if let Ok(_) = update_user_token(&user_info) {
+        audit_event("TOKEN_CREATED", &format!("Session token {} for user {} created", user_info.token, user_info.username));
+        audit_event("LOGIN_SUCCESS", &format!("Login success for user {}", user_info.username));
         Ok(Response::with((iron::status::Ok, user_info.token)))
     } else {
-        println!("Unable to update user token");
+        println!("Unable to create token session");
+        audit_event("LOGIN_FAILURE_TOKEN_CREATION_FAIL", &format!("Login failure for user {} due to token creation failure", user_info.username));
         Ok(Response::with(iron::status::InternalServerError))
-    }    
+    }
 }
 
 fn generate_authorization_token() -> String {
@@ -176,6 +204,8 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         println!("{}", e);
         return Ok(Response::with(iron::status::InternalServerError));
     }
+
+    audit_event("SECRET_CREATED", &format!("Secret {} set with UUID {}", args.0, uuid));
     
     Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
 }
@@ -213,7 +243,7 @@ fn get_etcd_key(key: &str) -> Result<String> {
     Ok(value.unwrap_or(String::from("")))
 }
 
-fn validate_token(token: &str) -> Result<()> {
+fn validate_token(token: &str) -> Result<&str> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
@@ -222,8 +252,11 @@ fn validate_token(token: &str) -> Result<()> {
 
     let fetch_token = kv::get(&client, &format!("/session_tokens/{}", token), kv::GetOptions::default());
     core.run(fetch_token).or(Err(format!("Token {} not found", token)))?;
+
+    let user = kv::get(&client, &format!("/session_tokens/{}/user", token), kv::GetOptions::default());
+    core.run(user).or(Err(format!("Token {} not found", token)))?;
     
-    Ok(())
+    Ok("")
 }
 
 fn fetch_secret(req: &mut Request) -> IronResult<Response> {
@@ -251,6 +284,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     if let Ok(value) = get_etcd_key(&format!("/secrets/{}/value", uuid))
     {
         return Ok(Response::with((iron::status::Ok, value)));
+        //audit_event("SECRET_RETRIEVED", &format!("Secret {} retrieved by user", user_info.username));
     } 
     else {
         println!("Secret {} not found", name);
