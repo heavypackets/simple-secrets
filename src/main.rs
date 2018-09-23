@@ -197,7 +197,6 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         println!("{}", e);
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
-    // println!("{} {} {}", args.0, args.1, token);
 
     // Set secret
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, args.0.as_bytes()); // Use secret name to gen SHA1-based UUID
