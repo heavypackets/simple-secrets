@@ -90,7 +90,7 @@ fn main() {
     router.post("/set/:name/:value", set_secret, "set_secret");
 
     Iron::new(router).http("0.0.0.0:3000").unwrap();
-    audit_event("SERVER_START", "New instance of secret-server started");
+    audit_event("SERVER_START", &format!("New instance of secret-server started: {}", *SPIFFE_ID));
 }
 
 fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>> {
