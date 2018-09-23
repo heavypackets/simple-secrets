@@ -188,15 +188,20 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     };
     
     // Validate token
-    let token = match req.url.query() {
-        Some(val) => val.replace("token=", ""),
-        None => return Ok(Response::with(iron::status::BadRequest))
-    };
+    let token;
+    if let Some(val) = req.url.query() {
+        token = val.replace("token=", "");
+    } else {
+        audit_event("SECRET_CREATE_FAILURE_NO_TOKEN", &format!("Secret {} failed set, no token entered attempt", args.0));
+        return Ok(Response::with((iron::status::BadRequest, "Token required")));
+    }
 
     let username;
-    match validate_token(&token) {
-        Ok(val) => username = val,
-        _ => return Ok(Response::with((iron::status::Unauthorized, "Bad token")))
+    if let Ok(val) = validate_token(&token) {
+        username = val;
+    } else {
+        audit_event("SECRET_CREATE_FAILURE_INVALID_TOKEN", &format!("Secret {} failed set, invalid token attempt", args.0));
+        return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
 
     // Set secret
