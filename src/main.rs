@@ -29,6 +29,7 @@ use rand::distributions::Alphanumeric;
 use errors::*;
 
 lazy_static! {
+    // Program options
     static ref ETCD_CLUSTER_MEMBERS: &'static str = {
         if let Ok(val) = std::env::var("ETCD_CLUSTER_MEMBERS") {
             Box::leak(val.into_boxed_str())
@@ -44,8 +45,10 @@ lazy_static! {
         }
     };
 
+    // Application instance SPIFFE ID
     static ref SPIFFE_ID: &'static str = "spiffe://example.org/simple-secrets";
 
+    // Fluentd client
     static ref FLUENTD_FORWARD_ADDR: &'static str = {
         if let Ok(val) = std::env::var("FLUENTD_FORWARD_ADDR") {
             Box::leak(val.into_boxed_str())
