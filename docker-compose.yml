@@ -83,8 +83,17 @@ services:
       ETCD_PORT: 2379
     depends_on:
       - etcd0
+  
+  fluentd:
+    image: fluent/fluentd
+    ports:
+      - 24224:24224
+      - 24224:24224/udp
+    volumes:
+      - audit_log:/fluentd/log
 
 volumes:
   etcd0:
   etcd1:
   etcd2:
+  audit_log:
