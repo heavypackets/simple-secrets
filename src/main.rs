@@ -1,13 +1,14 @@
-extern crate iron;
-extern crate router;
-extern crate etcd;
-extern crate futures;
-extern crate tokio_core;
-extern crate hyper;
 extern crate argonautica;
-extern crate rand;
-extern crate uuid;
+extern crate etcd;
 extern crate fruently;
+extern crate futures;
+extern crate hyper;
+extern crate iron;
+extern crate rand;
+extern crate router;
+extern crate spiffe;
+extern crate tokio_core;
+extern crate uuid;
 
 #[macro_use]
 extern crate lazy_static;
@@ -16,20 +17,31 @@ extern crate error_chain;
 #[macro_use]
 extern crate prometheus;
 
-use iron::prelude::*;
-use iron::headers::*;
-use router::Router;
-use etcd::kv::{self};
-use futures::Future;
-use tokio_core::reactor::Core;
+use etcd::kv;
 use fruently::fluent::Fluent;
 use fruently::forwardable::JsonForwardable;
-use prometheus::{Counter, Encoder, HistogramVec, TextEncoder};
+use futures::Future;
+use iron::headers::*;
+use iron::prelude::*;
+use prometheus::{Counter, Encoder, TextEncoder};
+use router::Router;
+use tokio_core::reactor::Core;
 
-use rand::{Rng, thread_rng};
 use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
+use std::convert::From;
 
-use errors::*;
+error_chain! {
+    types {
+        Error, ErrorKind, ResultExt, Result;
+    }
+
+    foreign_links {
+            Io(std::io::Error);
+            Etcd(etcd::Error);
+            Fluentd(fruently::error::FluentError);
+    }
+}
 
 lazy_static! {
     // Program options
@@ -63,7 +75,7 @@ lazy_static! {
 
     // Prometheus objects
     static ref prometheus_encoder: TextEncoder = TextEncoder::new();
-    static ref successful_login_counter: Counter = { 
+    static ref successful_login_counter: Counter = {
         match register_counter!(opts!(
         "simple_secrets_login_success_total",
         "Total number of sucessful logins in this instance lifetime.")) {
@@ -71,7 +83,7 @@ lazy_static! {
             Err(e) => telemetry_config_failed_panic(&e)
         }
     };
-    static ref unsuccessful_login_counter: Counter = { 
+    static ref unsuccessful_login_counter: Counter = {
         match register_counter!(opts!(
         "simple_secrets_login_failure_total",
         "Total number of failed logins in this instance lifetime.")) {
@@ -79,7 +91,7 @@ lazy_static! {
             Err(e) => telemetry_config_failed_panic(&e)
         }
     };
-    static ref secrets_fetch_counter: Counter = { 
+    static ref secrets_fetch_counter: Counter = {
         match register_counter!(opts!(
         "simple_secrets_secret_fetch_total",
         "Total number of secrets accessed in this instance lifetime.")) {
@@ -87,7 +99,7 @@ lazy_static! {
             Err(e) => telemetry_config_failed_panic(&e)
         }
     };
-    static ref secrets_fetch_access_denied_counter: Counter = { 
+    static ref secrets_fetch_access_denied_counter: Counter = {
         match register_counter!(opts!(
         "simple_secrets_secret_fetch_access_denied_total",
         "Total number of unsuccessful secret access attempts in this instance lifetime due to invalid token.")) {
@@ -95,7 +107,7 @@ lazy_static! {
             Err(e) => telemetry_config_failed_panic(&e)
         }
     };
-    static ref secrets_set_counter: Counter = { 
+    static ref secrets_set_counter: Counter = {
         match register_counter!(opts!(
         "simple_secrets_secret_set_total",
         "Total number of secrets set in this instance lifetime.")) {
@@ -103,7 +115,7 @@ lazy_static! {
             Err(e) => telemetry_config_failed_panic(&e)
         }
     };
-    static ref secrets_set_access_denied_counter: Counter = { 
+    static ref secrets_set_access_denied_counter: Counter = {
         match register_counter!(opts!(
         "simple_secrets_secret_set_access_denied_total",
         "Total number of unsuccessful secret set attempts in this instance lifetime due to invalid token.")) {
@@ -116,20 +128,6 @@ lazy_static! {
 fn telemetry_config_failed_panic(e: &prometheus::Error) -> prometheus::Counter {
     eprintln!("Unable to create prometheus primative {}", e);
     panic!("Error creating Prometheus telemetry primative");
-}
-
-mod errors {
-    error_chain!{
-        types {
-            Error, ErrorKind, ResultExt, Result;
-        }
-
-        foreign_links {
-             Io(::std::io::Error);
-             Etcd(::etcd::Error);
-             Fluent(::fruently::error::FluentError);
-        }
-    }
 }
 
 fn audit_event(title: &str, content: &str) {
@@ -153,12 +151,22 @@ fn main() {
     router.get("/metrics", metrics, "get_metrics");
 
     Iron::new(router).http("0.0.0.0:3000").unwrap();
-    audit_event("SERVER_START", &format!("New instance of secret-server started: {}", *SPIFFE_ID));
+    audit_event(
+        "SERVER_START",
+        &format!("New instance of secret-server started: {}", *SPIFFE_ID),
+    );
 }
 
 fn new_etcd_client(core: &Core) -> Result<etcd::Client<hyper::client::HttpConnector>> {
     let handle = core.handle();
-    etcd::Client::new(&handle,ETCD_CLUSTER_MEMBERS.split(",").collect::<Vec<&str>>().as_slice(), None).chain_err(|| "Cannot create etcd client")
+    etcd::Client::new(
+        &handle,
+        ETCD_CLUSTER_MEMBERS
+            .split(',')
+            .collect::<Vec<&str>>()
+            .as_slice(),
+        None,
+    ).chain_err(|| "Cannot create etcd client")
 }
 
 type AuthToken = String;
@@ -171,7 +179,7 @@ struct UserInfo {
     token: AuthToken,
 }
 
-fn fetch_user_password(user_info: &mut UserInfo) {  
+fn fetch_user_password(user_info: &mut UserInfo) {
     if let Ok(value) = get_etcd_key(&format!("/users/{}/password", user_info.username)) {
         user_info.encoded_password = value
     }
@@ -184,7 +192,7 @@ fn verify_password(user_info: &UserInfo) -> bool {
         .with_password(&user_info.password)
         .verify()
     {
-       true
+        true
     } else {
         false
     }
@@ -194,36 +202,56 @@ fn login(req: &mut Request) -> IronResult<Response> {
     // Parse username and password from request
     let auth = match req.headers.get::<Authorization<Basic>>() {
         Some(auth) => auth,
-        None => return Ok(Response::with(iron::status::Unauthorized))
+        None => return Ok(Response::with(iron::status::Unauthorized)),
     };
 
     let mut user_info = UserInfo::default();
     user_info.username = auth.username.clone();
     user_info.password = match auth.password.clone() {
         Some(password) => password,
-        None  => return Ok(Response::with(iron::status::Unauthorized))
+        None => return Ok(Response::with(iron::status::Unauthorized)),
     };
-    
+
     // Fetch user password from etcd
     fetch_user_password(&mut user_info);
 
     // Check password
-    if !verify_password(&user_info)
-    {
-        audit_event("LOGIN_FAILURE_INVALID_PASSWORD", &format!("Login failure for user {} due to invalid password", user_info.username));
+    if !verify_password(&user_info) {
+        audit_event(
+            "LOGIN_FAILURE_INVALID_PASSWORD",
+            &format!(
+                "Login failure for user {} due to invalid password",
+                user_info.username
+            ),
+        );
         unsuccessful_login_counter.inc();
-        return Ok(Response::with(iron::status::Unauthorized))
+        return Ok(Response::with(iron::status::Unauthorized));
     }
 
     // Generate and set new token
     user_info.token = generate_authorization_token();
-    if let Ok(_) = update_user_token(&user_info) {
-        audit_event("TOKEN_CREATED", &format!("Session token {} for user {} created", user_info.token, user_info.username));
-        audit_event("LOGIN_SUCCESS", &format!("Login success for user {}", user_info.username));
+    if update_user_token(&user_info).is_ok() {
+        audit_event(
+            "TOKEN_CREATED",
+            &format!(
+                "Session token {} for user {} created",
+                user_info.token, user_info.username
+            ),
+        );
+        audit_event(
+            "LOGIN_SUCCESS",
+            &format!("Login success for user {}", user_info.username),
+        );
         successful_login_counter.inc();
         Ok(Response::with((iron::status::Ok, user_info.token)))
     } else {
-        audit_event("LOGIN_FAILURE_TOKEN_CREATION_FAIL", &format!("Login failure for user {} due to token creation failure", user_info.username));
+        audit_event(
+            "LOGIN_FAILURE_TOKEN_CREATION_FAIL",
+            &format!(
+                "Login failure for user {} due to token creation failure",
+                user_info.username
+            ),
+        );
         Ok(Response::with(iron::status::InternalServerError))
     }
 }
@@ -236,28 +264,39 @@ fn generate_authorization_token() -> String {
         .collect()
 }
 
-fn update_user_token(user_info: &UserInfo) -> Result<()> { 
-    set_etcd_key(&format!("/session_tokens/{}", user_info.token), &user_info.username, Some(*TOKEN_EXPIRATION_SECS))?;
-    
+fn update_user_token(user_info: &UserInfo) -> Result<()> {
+    set_etcd_key(
+        &format!("/session_tokens/{}", user_info.token),
+        &user_info.username,
+        Some(*TOKEN_EXPIRATION_SECS),
+    )?;
+
     Ok(())
 }
 
 fn set_secret(req: &mut Request) -> IronResult<Response> {
     // Parse name/value from URL
     let args;
-    
-    match req.extensions.get::<Router>()
-    {
-        Some(params) => args = (params.find("name").unwrap_or(""), params.find("value").unwrap_or("")),
-        None => return Ok(Response::with(iron::status::BadRequest))
+
+    match req.extensions.get::<Router>() {
+        Some(params) => {
+            args = (
+                params.find("name").unwrap_or(""),
+                params.find("value").unwrap_or(""),
+            )
+        }
+        None => return Ok(Response::with(iron::status::BadRequest)),
     };
-    
+
     // Validate token
     let token;
     if let Some(val) = req.url.query() {
         token = val.replace("token=", "");
     } else {
-        audit_event("SECRET_CREATE_FAILURE_NO_TOKEN", &format!("Secret {} failed set, no token entered attempt", args.0));
+        audit_event(
+            "SECRET_CREATE_FAILURE_NO_TOKEN",
+            &format!("Secret {} failed set, no token entered attempt", args.0),
+        );
         secrets_set_access_denied_counter.inc();
         return Ok(Response::with((iron::status::BadRequest, "Token required")));
     }
@@ -266,7 +305,10 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     if let Ok(val) = validate_token(&token) {
         username = val;
     } else {
-        audit_event("SECRET_CREATE_FAILURE_INVALID_TOKEN", &format!("Secret {} failed set, invalid token attempt", args.0));
+        audit_event(
+            "SECRET_CREATE_FAILURE_INVALID_TOKEN",
+            &format!("Secret {} failed set, invalid token attempt", args.0),
+        );
         secrets_set_access_denied_counter.inc();
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
@@ -275,18 +317,36 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     let uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, args.0.as_bytes()); // Use secret name to gen SHA1-based UUID
     if let Err(e) = set_etcd_key(&format!("/secrets/{}/name", uuid), args.0, None) {
         eprintln!("Unable to set secret key: {}", e);
-        audit_event("SECRET_CREATE_FAILURE", &format!("Unable to set secret {} by user {}, internal error", args.0, username));
+        audit_event(
+            "SECRET_CREATE_FAILURE",
+            &format!(
+                "Unable to set secret {} by user {}, internal error",
+                args.0, username
+            ),
+        );
 
         return Ok(Response::with(iron::status::InternalServerError));
     }
     if let Err(e) = set_etcd_key(&format!("/secrets/{}/value", uuid), args.1, None) {
         eprintln!("Unable to set secret value: {}", e);
-        audit_event("SECRET_CREATE_FAILURE", &format!("Unable to set secret {} by user {}, internal error", args.0, username));
+        audit_event(
+            "SECRET_CREATE_FAILURE",
+            &format!(
+                "Unable to set secret {} by user {}, internal error",
+                args.0, username
+            ),
+        );
 
         return Ok(Response::with(iron::status::InternalServerError));
     }
 
-    audit_event("SECRET_CREATE_SUCCESS", &format!("Secret {} set with UUID {} by user {}", args.0, uuid, username));
+    audit_event(
+        "SECRET_CREATE_SUCCESS",
+        &format!(
+            "Secret {} set with UUID {} by user {}",
+            args.0, uuid, username
+        ),
+    );
     secrets_set_counter.inc();
     Ok(Response::with((iron::status::Ok, format!("{}", uuid))))
 }
@@ -295,11 +355,16 @@ fn set_etcd_key(key: &str, value: &str, expiration: Option<u64>) -> Result<()> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
-        Err(_) => Err("Unable to create etcd client")?
+        Err(_) => Err("Unable to create etcd client")?,
     };
 
     let set_token = kv::set(&client, key, value, expiration);
-    core.run(set_token).or(Err(format!("Unable to update etcd key {}", key)))?;
+    core.run(set_token).or_else(|mut e| {
+        Err(Error::with_chain(
+            e.pop().unwrap(),
+            format!("Unable to update etcd key {}", key),
+        ))
+    })?;
 
     Ok(())
 }
@@ -308,7 +373,7 @@ fn get_etcd_key(key: &str) -> Result<String> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
-        Err(_) => Err("Unable to create etcd client")?
+        Err(_) => Err("Unable to create etcd client")?,
     };
 
     let mut value = None;
@@ -318,48 +383,56 @@ fn get_etcd_key(key: &str) -> Result<String> {
 
             Ok(())
         });
-    core.run(get_token).or(Err(format!("Unable to fetch etcd key {}", key)))?;
+        core.run(get_token)
+            .or_else(|_| Err(format!("Unable to fetch etcd key {}", key)))?;
     }
 
-    Ok(value.unwrap_or(String::from("")))
+    Ok(value.unwrap_or_else(|| String::from("")))
 }
 
 fn validate_token(token: &str) -> Result<String> {
     let mut core = Core::new()?;
     let client = match new_etcd_client(&core) {
         Ok(client) => client,
-        Err(_) => Err("Unable to create etcd client")?
+        Err(_) => Err("Unable to create etcd client")?,
     };
 
     let mut username = None;
     {
-    let fetch_token = kv::get(&client, &format!("/session_tokens/{}", token), kv::GetOptions::default()).and_then(|response| {
-        username = response.data.node.value;
+        let fetch_token = kv::get(
+            &client,
+            &format!("/session_tokens/{}", token),
+            kv::GetOptions::default(),
+        ).and_then(|response| {
+            username = response.data.node.value;
 
-        Ok(())
-    });
-    core.run(fetch_token).or(Err(format!("Token {} not found", token)))?;
+            Ok(())
+        });
+        core.run(fetch_token)
+            .or_else(|_| Err(format!("Token {} not found", token)))?;
     }
-    
-    Ok(username.unwrap_or(String::from("")))
+
+    Ok(username.unwrap_or_else(|| String::from("")))
 }
 
 fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     // Parse name from URL
     let name;
-    
-    match req.extensions.get::<Router>()
-    {
+
+    match req.extensions.get::<Router>() {
         Some(params) => name = params.find("name").unwrap_or(""),
-        None => return Ok(Response::with(iron::status::BadRequest)) // This should never happen
+        None => return Ok(Response::with(iron::status::BadRequest)), // This should never happen
     };
-    
+
     // Validate token
     let token;
     if let Some(val) = req.url.query() {
         token = val.replace("token=", "");
     } else {
-        audit_event("SECRET_FETCH_FAILURE_NO_TOKEN", &format!("Secret {} failed fetch, no token entered attempt", name));
+        audit_event(
+            "SECRET_FETCH_FAILURE_NO_TOKEN",
+            &format!("Secret {} failed fetch, no token entered attempt", name),
+        );
         secrets_fetch_access_denied_counter.inc();
         return Ok(Response::with((iron::status::BadRequest, "Token required")));
     }
@@ -368,7 +441,10 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     if let Ok(val) = validate_token(&token) {
         username = val;
     } else {
-        audit_event("SECRET_FETCH_FAILURE_INVALID_TOKEN", &format!("Secret {} failed fetch, invalid token attempt", name));
+        audit_event(
+            "SECRET_FETCH_FAILURE_INVALID_TOKEN",
+            &format!("Secret {} failed fetch, invalid token attempt", name),
+        );
         secrets_fetch_access_denied_counter.inc();
         return Ok(Response::with((iron::status::Unauthorized, "Bad token")));
     }
@@ -378,13 +454,22 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     let value = get_etcd_key(&format!("/secrets/{}/value", uuid));
     match value {
         Ok(value) => {
-            audit_event("SECRET_FETCH_SUCCESS", &format!("Secret {} UUID {} fetched by user {}", name, uuid, username));
+            audit_event(
+                "SECRET_FETCH_SUCCESS",
+                &format!("Secret {} UUID {} fetched by user {}", name, uuid, username),
+            );
             secrets_fetch_counter.inc();
             Ok(Response::with((iron::status::Ok, value)))
-        }, 
+        }
         Err(e) => {
             eprintln!("Unable to fetch secret: {}", e);
-            audit_event("SECRET_FETCH_FAILURE_NOEXIST", &format!("Secret {} failed fetch by user {}, does not exist", name, username));
+            audit_event(
+                "SECRET_FETCH_FAILURE_NOEXIST",
+                &format!(
+                    "Secret {} failed fetch by user {}, does not exist",
+                    name, username
+                ),
+            );
             Ok(Response::with((iron::status::BadRequest, "Invalid secret")))
         }
     }
@@ -400,12 +485,12 @@ fn metrics(_req: &mut Request) -> IronResult<Response> {
                 Ok(val) => val,
                 Err(e) => {
                     eprintln!("Unable to encode prometheus metrics: {}", e.to_string());
-                    return Ok(Response::with(iron::status::InternalServerError))
+                    return Ok(Response::with(iron::status::InternalServerError));
                 }
             };
 
             Ok(Response::with((iron::status::Ok, body)))
-        },
+        }
         Err(e) => {
             eprintln!("Unable to encode prometheus metrics: {}", e.to_string());
             Ok(Response::with(iron::status::InternalServerError))
