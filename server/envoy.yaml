@@ -1,0 +1,86 @@
+admin:
+  access_log_path: /tmp/admin_access.log
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: simple-secrets-metrics
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 10000 }
+      filter_chains:
+        - filters:
+            - name: envoy.http_connection_manager
+              config:
+                stat_prefix: ingress_http
+                codec_type: AUTO
+                route_config:
+                  name: secrets-metrics-route
+                  virtual_hosts:
+                    - name: secrets-metrics-endpoint
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: secrets-metrics }
+                http_filters:
+                  - name: envoy.router
+          tls_context:
+            common_tls_context:
+              tls_params:
+                ecdh_curves: "X25519:P-256:P-521:P-384"
+              tls_certificates:
+                certificate_chain: { "filename": "/certs/svid.pem" }
+                private_key: { "filename": "/certs/svid_key.pem" }
+              validation_context:
+                trusted_ca:
+                  filename: /certs/svid_bundle.pem
+                verify_subject_alt_name:
+                  - "spiffe://example.org/prometheus-proxy"
+    - name: fluentd
+      address:
+        socket_address: { address: 127.0.0.1, port_value: 24224 }
+      filter_chains:
+        - filters:
+            - name: envoy.tcp_proxy
+              config:
+                stat_prefix: ingress_tcp
+                cluster: fluentd
+  clusters:
+    - name: secrets-metrics
+      connect_timeout: 15s
+      type: STATIC
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: secrets-metrics
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 3001
+    - name: fluentd
+      connect_timeout: 15s
+      type: STRICT_DNS
+      tls_context:
+        common_tls_context:
+          tls_params:
+            ecdh_curves: "X25519:P-256:P-521:P-384"
+          tls_certificates:
+            certificate_chain: { "filename": "/certs/svid.pem" }
+            private_key: { "filename": "/certs/svid_key.pem" }
+          validation_context:
+            trusted_ca:
+              filename: /certs/svid_bundle.pem
+            verify_subject_alt_name:
+              - "spiffe://example.org/fluentd-proxy"
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: fluentd
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: fluentd-proxy
+                      port_value: 24224

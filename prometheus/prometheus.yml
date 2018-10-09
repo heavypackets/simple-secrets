@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 3s
+  evaluation_interval: 3s
+
+rule_files:
+  - "/etc/prometheus/secrets-server.rules"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "secrets-server"
+    static_configs:
+      - targets: ["prometheus-proxy:10000"]
