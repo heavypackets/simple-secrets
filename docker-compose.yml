@@ -2,14 +2,39 @@ version: '2'
 services:
 
   simple-secrets:
-    build: .
+    build:
+        context: .
+        dockerfile: ./server/Dockerfile
+    networks:
+      envoymesh:
     ports:
       - 3000:3000
+      - 10000:10000
     environment:
       ETCD_CLUSTER_MEMBERS: "http://etcd0:2379,http://etcd1:2379,http://etcd2:2379"
+      FLUENTD_FORWARD_ADDR: "fluentd:24224"
+    depends_on:
+      - spire-server
+      - fluentd
+  
+  spire-server:
+    build: 
+      context: ./spire
+      dockerfile: Dockerfile
+    networks:
+      envoymesh:
+    expose:
+      - "8080"
+      - "8081"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    tty: true
 
   etcd0:
     image: quay.io/coreos/etcd
+    networks:
+      envoymesh:
     ports:
       - 2379:2379
     volumes:
@@ -30,8 +55,11 @@ services:
       - http://0.0.0.0:2380
       - -initial-cluster
       - etcd0=http://etcd0:2380,etcd1=http://etcd1:2380,etcd2=http://etcd2:2380
+
   etcd1:
     image: quay.io/coreos/etcd
+    networks:
+      envoymesh:
     ports:
       - 2379
     volumes:
@@ -52,8 +80,11 @@ services:
       - http://0.0.0.0:2380
       - -initial-cluster
       - etcd0=http://etcd0:2380,etcd1=http://etcd1:2380,etcd2=http://etcd2:2380
+
   etcd2:
     image: quay.io/coreos/etcd
+    networks:
+      envoymesh:
     ports:
       - 2379
     volumes:
@@ -74,8 +105,11 @@ services:
       - http://0.0.0.0:2380
       - -initial-cluster
       - etcd0=http://etcd0:2380,etcd1=http://etcd1:2380,etcd2=http://etcd2:2380
+
   etcd-browser:
     build: ./etcd-browser
+    networks:
+      envoymesh:
     ports:
       - 8000:8000
     environment:
@@ -86,14 +120,58 @@ services:
   
   fluentd:
     image: fluent/fluentd
+    networks:
+      envoymesh:
     ports:
       - 24224:24224
       - 24224:24224/udp
     volumes:
       - audit_log:/fluentd/log
 
+  prometheus:
+    image: quay.io/prometheus/prometheus
+    networks:
+      prometheus:
+    ports:
+      - "9090:9090"
+    volumes:
+      - "./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml"
+      - "./prometheus/secrets-server.rules:/etc/prometheus/secrets-server.rules"
+    entrypoint:
+    - 'prometheus'
+    - '--config.file=/etc/prometheus/prometheus.yml'
+    - '--web.external-url=http://localhost:9090'
+  
+  prometheus-proxy:
+    build: 
+      context: .
+      dockerfile: ./prometheus-proxy/Dockerfile
+    networks:
+      envoymesh:
+      prometheus:
+    expose:
+      - 10000-11000
+    tty: true
+
+  alertmanager:
+    image: quay.io/prometheus/alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - "./prometheus/alertmanager.yml:/etc/alertmanager.yml"
+    entrypoint:
+      - 'alertmanager'
+      - '--config.file'
+      - '/etc/alertmanager.yml'
+      - '--web.external-url=http://localhost:9093'
+
 volumes:
   etcd0:
   etcd1:
   etcd2:
   audit_log:
+
+    
+networks:
+  envoymesh: {}
+  prometheus: {}

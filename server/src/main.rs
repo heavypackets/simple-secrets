@@ -6,7 +6,6 @@ extern crate hyper;
 extern crate iron;
 extern crate rand;
 extern crate router;
-extern crate spiffe;
 extern crate tokio_core;
 extern crate uuid;
 
@@ -24,12 +23,11 @@ use futures::Future;
 use iron::headers::*;
 use iron::prelude::*;
 use prometheus::{Counter, Encoder, TextEncoder};
-use router::Router;
-use tokio_core::reactor::Core;
-
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use router::Router;
 use std::convert::From;
+use tokio_core::reactor::Core;
 
 error_chain! {
     types {
@@ -61,7 +59,7 @@ lazy_static! {
     };
 
     // Application instance SPIFFE ID
-    static ref SPIFFE_ID: &'static str = "spiffe://example.org/simple-secrets";
+    static ref SPIFFE_ID: &'static str = "spiffe://example.org/simple-secrets1";
 
     // Fluentd client
     static ref FLUENTD_FORWARD_ADDR: &'static str = {
@@ -130,9 +128,49 @@ fn telemetry_config_failed_panic(e: &prometheus::Error) -> prometheus::Counter {
     panic!("Error creating Prometheus telemetry primative");
 }
 
-fn audit_event(title: &str, content: &str) {
+#[derive(Clone, Copy)]
+enum ServerEvents {
+    Start,
+    LoginFailureInvalidPassword,
+    LoginFailureTokenCreationFailure,
+    TokenCreated,
+    LoginSuccess,
+    SecretCreateFailure,
+    SecretCreateFailureNoToken,
+    SecretCreateFailureInvalidToken,
+    SecretCreateSuccess,
+    SecretFetchFailureNoToken,
+    SecretFetchFailureInvalidToken,
+    SecretFetchFailureNoExist,
+    SecretFetchSuccess,
+}
+
+impl std::fmt::Display for ServerEvents {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let output = match self {
+            ServerEvents::Start => "SERVER_START",
+            ServerEvents::LoginFailureInvalidPassword => "LOGIN_FAILURE_INVALID_PASSWORD",
+            ServerEvents::LoginFailureTokenCreationFailure => {
+                "LOGIN_FAILURE_TOKEN_CREATION_FAILURE"
+            }
+            ServerEvents::TokenCreated => "TOKEN_CREATED",
+            ServerEvents::LoginSuccess => "LOGIN_SUCCESS",
+            ServerEvents::SecretCreateFailure => "SECRET_CREATE_FAILURE",
+            ServerEvents::SecretCreateFailureNoToken => "SECRET_CREATE_FAILURE_NO_TOKEN",
+            ServerEvents::SecretCreateFailureInvalidToken => "SECRET_CREATE_FAILURE_INVALID_TOKEN",
+            ServerEvents::SecretCreateSuccess => "SECRET_CREATE_SUCCESS",
+            ServerEvents::SecretFetchFailureNoToken => "SECRET_FETCH_FAILURE_NO_TOKEN",
+            ServerEvents::SecretFetchFailureInvalidToken => "SECRET_FETCH_FAILURE_INVALID_TOKEN",
+            ServerEvents::SecretFetchFailureNoExist => "SECRET_FETCH_FAILURE_NOEXIST",
+            ServerEvents::SecretFetchSuccess => "SECRET_FETCH_SUCCESS",
+        };
+        write!(f, "{}", output)
+    }
+}
+
+fn audit_event(event: ServerEvents, content: &str) {
     let mut obj: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    obj.insert(String::from(title), String::from(content));
+    obj.insert(event.to_string(), String::from(content));
     let fruently = fluentd_client.clone();
 
     std::thread::spawn(move || {
@@ -144,15 +182,18 @@ fn audit_event(title: &str, content: &str) {
 }
 
 fn main() {
-    let mut router = Router::new();
-    router.get("/login", login, "login");
-    router.get("/get/:name", fetch_secret, "get_secret");
-    router.post("/set/:name/:value", set_secret, "set_secret");
-    router.get("/metrics", metrics, "get_metrics");
+    let mut api_router = Router::new();
+    api_router.get("/login", login, "login");
+    api_router.get("/get/:name", fetch_secret, "get_secret");
+    api_router.post("/set/:name/:value", set_secret, "set_secret");
+    let _api = Iron::new(api_router).http("0.0.0.0:3000");
 
-    Iron::new(router).http("0.0.0.0:3000").unwrap();
+    let mut metrics_router = Router::new();
+    metrics_router.get("/metrics", metrics, "get_metrics");
+    let _metrics = Iron::new(metrics_router).http("127.0.0.1:3001");
+
     audit_event(
-        "SERVER_START",
+        ServerEvents::Start,
         &format!("New instance of secret-server started: {}", *SPIFFE_ID),
     );
 }
@@ -218,7 +259,7 @@ fn login(req: &mut Request) -> IronResult<Response> {
     // Check password
     if !verify_password(&user_info) {
         audit_event(
-            "LOGIN_FAILURE_INVALID_PASSWORD",
+            ServerEvents::LoginFailureInvalidPassword,
             &format!(
                 "Login failure for user {} due to invalid password",
                 user_info.username
@@ -232,21 +273,21 @@ fn login(req: &mut Request) -> IronResult<Response> {
     user_info.token = generate_authorization_token();
     if update_user_token(&user_info).is_ok() {
         audit_event(
-            "TOKEN_CREATED",
+            ServerEvents::TokenCreated,
             &format!(
                 "Session token {} for user {} created",
                 user_info.token, user_info.username
             ),
         );
         audit_event(
-            "LOGIN_SUCCESS",
+            ServerEvents::LoginSuccess,
             &format!("Login success for user {}", user_info.username),
         );
         successful_login_counter.inc();
         Ok(Response::with((iron::status::Ok, user_info.token)))
     } else {
         audit_event(
-            "LOGIN_FAILURE_TOKEN_CREATION_FAIL",
+            ServerEvents::LoginFailureTokenCreationFailure,
             &format!(
                 "Login failure for user {} due to token creation failure",
                 user_info.username
@@ -294,7 +335,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         token = val.replace("token=", "");
     } else {
         audit_event(
-            "SECRET_CREATE_FAILURE_NO_TOKEN",
+            ServerEvents::SecretCreateFailureNoToken,
             &format!("Secret {} failed set, no token entered attempt", args.0),
         );
         secrets_set_access_denied_counter.inc();
@@ -306,7 +347,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
         username = val;
     } else {
         audit_event(
-            "SECRET_CREATE_FAILURE_INVALID_TOKEN",
+            ServerEvents::SecretCreateFailureInvalidToken,
             &format!("Secret {} failed set, invalid token attempt", args.0),
         );
         secrets_set_access_denied_counter.inc();
@@ -318,7 +359,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     if let Err(e) = set_etcd_key(&format!("/secrets/{}/name", uuid), args.0, None) {
         eprintln!("Unable to set secret key: {}", e);
         audit_event(
-            "SECRET_CREATE_FAILURE",
+            ServerEvents::SecretCreateFailure,
             &format!(
                 "Unable to set secret {} by user {}, internal error",
                 args.0, username
@@ -330,7 +371,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     if let Err(e) = set_etcd_key(&format!("/secrets/{}/value", uuid), args.1, None) {
         eprintln!("Unable to set secret value: {}", e);
         audit_event(
-            "SECRET_CREATE_FAILURE",
+            ServerEvents::SecretCreateFailure,
             &format!(
                 "Unable to set secret {} by user {}, internal error",
                 args.0, username
@@ -341,7 +382,7 @@ fn set_secret(req: &mut Request) -> IronResult<Response> {
     }
 
     audit_event(
-        "SECRET_CREATE_SUCCESS",
+        ServerEvents::SecretCreateSuccess,
         &format!(
             "Secret {} set with UUID {} by user {}",
             args.0, uuid, username
@@ -430,7 +471,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
         token = val.replace("token=", "");
     } else {
         audit_event(
-            "SECRET_FETCH_FAILURE_NO_TOKEN",
+            ServerEvents::SecretFetchFailureNoToken,
             &format!("Secret {} failed fetch, no token entered attempt", name),
         );
         secrets_fetch_access_denied_counter.inc();
@@ -442,7 +483,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
         username = val;
     } else {
         audit_event(
-            "SECRET_FETCH_FAILURE_INVALID_TOKEN",
+            ServerEvents::SecretFetchFailureInvalidToken,
             &format!("Secret {} failed fetch, invalid token attempt", name),
         );
         secrets_fetch_access_denied_counter.inc();
@@ -455,7 +496,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
     match value {
         Ok(value) => {
             audit_event(
-                "SECRET_FETCH_SUCCESS",
+                ServerEvents::SecretFetchSuccess,
                 &format!("Secret {} UUID {} fetched by user {}", name, uuid, username),
             );
             secrets_fetch_counter.inc();
@@ -464,7 +505,7 @@ fn fetch_secret(req: &mut Request) -> IronResult<Response> {
         Err(e) => {
             eprintln!("Unable to fetch secret: {}", e);
             audit_event(
-                "SECRET_FETCH_FAILURE_NOEXIST",
+                ServerEvents::SecretFetchFailureNoExist,
                 &format!(
                     "Secret {} failed fetch by user {}, does not exist",
                     name, username

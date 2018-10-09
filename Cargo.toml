@@ -1,19 +1,5 @@
-[package]
-name = "simple-secrets"
-version = "0.1.0"
-authors = ["Sabree Blackmon <sabree@heavypackets.sh>"]
+[workspace]
 
-[dependencies]
-iron = "0.6.0"
-router = "0.6.0"
-tokio-core = "*"
-futures = "0.1.14"
-etcd = "*"
-hyper = "0.11.2"
-argonautica = "*"
-rand = "0.5.5"
-uuid = { version = "0.7", features = ["v5"] }
-lazy_static = "1.1.0"
-error-chain = "0.12.0"
-fruently = "~0.10.0"
-prometheus ="0.4"
+members = [
+    "server",
+]
