@@ -30,7 +30,6 @@ WORKDIR ${SPIRE_DIR}
 COPY conf/spire-agent.conf conf/agent/agent.conf
 
 # Install envoy config
-COPY server/envoy.yaml /etc/envoy.yaml
 COPY server/start_envoy.sh /usr/local/bin/start_envoy.sh
 RUN chmod +x /usr/local/bin/start_envoy.sh
 

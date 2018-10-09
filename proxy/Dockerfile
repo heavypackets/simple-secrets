@@ -18,8 +18,7 @@ WORKDIR ${SPIRE_DIR}
 COPY conf/spire-agent.conf conf/agent/agent.conf
 
 # Install envoy config
-COPY prometheus-proxy/envoy.yaml /etc/envoy.yaml
-COPY prometheus-proxy/start_envoy.sh /usr/local/bin/start_envoy.sh
+COPY proxy/start_envoy.sh /usr/local/bin/start_envoy.sh
 RUN chmod +x /usr/local/bin/start_envoy.sh
 
 # Install sidecar

@@ -1,40 +1,39 @@
-version: '2'
-services:
+version: "2"
 
+services:
   simple-secrets:
     build:
-        context: .
-        dockerfile: ./server/Dockerfile
+      context: .
+      dockerfile: ./server/Dockerfile
     networks:
-      envoymesh:
+      envoymesh: {}
     ports:
       - 3000:3000
       - 10000:10000
     environment:
       ETCD_CLUSTER_MEMBERS: "http://etcd0:2379,http://etcd1:2379,http://etcd2:2379"
-      FLUENTD_FORWARD_ADDR: "fluentd:24224"
+      FLUENTD_FORWARD_ADDR: "127.0.0.1:24224"
+    volumes:
+      - "./server/envoy.yaml:/etc/envoy.yaml"
     depends_on:
       - spire-server
-      - fluentd
-  
+      - fluentd-proxy
+
   spire-server:
-    build: 
+    build:
       context: ./spire
       dockerfile: Dockerfile
     networks:
-      envoymesh:
+      envoymesh: {}
     expose:
       - "8080"
       - "8081"
-    ports:
-      - "8080:8080"
-      - "8081:8081"
     tty: true
 
   etcd0:
     image: quay.io/coreos/etcd
     networks:
-      envoymesh:
+      envoymesh: {}
     ports:
       - 2379:2379
     volumes:
@@ -59,7 +58,7 @@ services:
   etcd1:
     image: quay.io/coreos/etcd
     networks:
-      envoymesh:
+      envoymesh: {}
     ports:
       - 2379
     volumes:
@@ -84,7 +83,7 @@ services:
   etcd2:
     image: quay.io/coreos/etcd
     networks:
-      envoymesh:
+      envoymesh: {}
     ports:
       - 2379
     volumes:
@@ -109,7 +108,7 @@ services:
   etcd-browser:
     build: ./etcd-browser
     networks:
-      envoymesh:
+      envoymesh: {}
     ports:
       - 8000:8000
     environment:
@@ -117,40 +116,50 @@ services:
       ETCD_PORT: 2379
     depends_on:
       - etcd0
-  
+
   fluentd:
     image: fluent/fluentd
     networks:
-      envoymesh:
-    ports:
-      - 24224:24224
-      - 24224:24224/udp
+      fluentd: {}
     volumes:
-      - audit_log:/fluentd/log
+      - ./log:/fluentd/log
+
+  fluentd-proxy:
+    build:
+      context: .
+      dockerfile: ./proxy/Dockerfile
+    expose:
+      - 24224
+    networks:
+      envoymesh: {}
+      fluentd: {}
+    volumes:
+      - "./fluentd-proxy/envoy.yaml:/etc/envoy.yaml"
+    tty: true
 
   prometheus:
     image: quay.io/prometheus/prometheus
     networks:
-      prometheus:
+      prometheus: {}
     ports:
       - "9090:9090"
     volumes:
       - "./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml"
       - "./prometheus/secrets-server.rules:/etc/prometheus/secrets-server.rules"
     entrypoint:
-    - 'prometheus'
-    - '--config.file=/etc/prometheus/prometheus.yml'
-    - '--web.external-url=http://localhost:9090'
-  
+      - "prometheus"
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.external-url=http://localhost:9090"
+
   prometheus-proxy:
-    build: 
+    build:
       context: .
-      dockerfile: ./prometheus-proxy/Dockerfile
+      dockerfile: ./proxy/Dockerfile
     networks:
-      envoymesh:
-      prometheus:
-    expose:
-      - 10000-11000
+      envoymesh: {}
+      prometheus: {}
+    volumes:
+      - "./prometheus-proxy/envoy.yaml:/etc/envoy.yaml"
     tty: true
 
   alertmanager:
@@ -160,18 +169,18 @@ services:
     volumes:
       - "./prometheus/alertmanager.yml:/etc/alertmanager.yml"
     entrypoint:
-      - 'alertmanager'
-      - '--config.file'
-      - '/etc/alertmanager.yml'
-      - '--web.external-url=http://localhost:9093'
+      - "alertmanager"
+      - "--config.file"
+      - "/etc/alertmanager.yml"
+      - "--web.external-url=http://localhost:9093"
 
 volumes:
-  etcd0:
-  etcd1:
-  etcd2:
-  audit_log:
+  etcd0: {}
+  etcd1: {}
+  etcd2: {}
+  audit_log: {}
 
-    
 networks:
   envoymesh: {}
   prometheus: {}
+  fluentd: {}
