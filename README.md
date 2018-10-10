@@ -4,7 +4,7 @@ This is a simple API driven "secret" store server written in Rust, backed by [et
 
 This app exports various application access and security heuristics via Prometheus endpoints and a Fluentd forwarder for analysis in future examples. 
 
-## API
+### API
 
 | Action                    | Verb | Path                              | Returns      | Port |
 | ------------------------- | ---- | --------------------------------- | ------------ | ---- |
@@ -35,6 +35,8 @@ To build Docker container, containing a [SPIRE](https://github.com/spiffe/spire)
 make server
 ```
 
+### Demo
+
 To build the demo environment, containing a 3 node [etcd](https://github.com/etcd-io/etcd) cluster, a [SPIRE](https://github.com/spiffe/spire) server, [Prometheus](https://github.com/prometheus/prometheus) and [Fluentd](https://github.com/fluent/fluentd):
 
 ```bash
@@ -42,7 +44,11 @@ make
 make env
 ```
 
-### Docker volumes
+#### Etcd Browser
+
+An [etcd brower](http://henszey.github.io/etcd-browser/) is available at http://localhost:8000/ in the demo environment to view secrets, session tokens, and users.
+
+#### Docker volumes
 
 | Path                | Mount           | Description                          |
 | ------------------- | --------------- | ------------------------------------ |
