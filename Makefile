@@ -7,7 +7,7 @@ server:
 env: all
 	docker-compose down
 	docker-compose up -d
-	./boostrap-etcd.sh
+	./bootstrap-etcd.sh
 	./register-spire-policy.sh
 	./register-spire-agents.sh
 
