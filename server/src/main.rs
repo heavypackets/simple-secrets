@@ -521,17 +521,7 @@ fn metrics(_req: &mut Request) -> IronResult<Response> {
     let mut buffer = vec![];
 
     match prometheus_encoder.encode(&metric_families, &mut buffer) {
-        Ok(_) => {
-            let body = match String::from_utf8(buffer) {
-                Ok(val) => val,
-                Err(e) => {
-                    eprintln!("Unable to encode prometheus metrics: {}", e.to_string());
-                    return Ok(Response::with(iron::status::InternalServerError));
-                }
-            };
-
-            Ok(Response::with((iron::status::Ok, body)))
-        }
+        Ok(_) => Ok(Response::with((iron::status::Ok, buffer))),
         Err(e) => {
             eprintln!("Unable to encode prometheus metrics: {}", e.to_string());
             Ok(Response::with(iron::status::InternalServerError))
